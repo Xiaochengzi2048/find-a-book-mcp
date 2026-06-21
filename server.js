@@ -15,21 +15,38 @@ const HEADERS = {
   "Referer": BASE_URL,
 };
 
-const server = new McpServer({ name: "libgen", version: "1.0.0" });
+// LibGen returns 25 results per server page; we show 5 per display page
+const LIBGEN_PAGE_SIZE = 25;
+const DISPLAY_PAGE_SIZE = 5;
 
-async function searchLibGen(query, count = 10, extensions = []) {
-  let url = `${BASE_URL}/index.php?req=${encodeURIComponent(query)}&res=${count}&covers=0&gmode=on&filesuns=all`;
+const server = new McpServer({ name: "libgen", version: "1.1.0" });
+
+function parseSizeBytes(sizeStr) {
+  const m = sizeStr.match(/([\d.]+)\s*(kb|mb|gb)/i);
+  if (!m) return 0;
+  const n = parseFloat(m[1]);
+  const unit = m[2].toLowerCase();
+  if (unit === "kb") return Math.round(n * 1024);
+  if (unit === "mb") return Math.round(n * 1024 * 1024);
+  if (unit === "gb") return Math.round(n * 1024 * 1024 * 1024);
+  return 0;
+}
+
+async function searchLibGen(query, displayPage = 1, extensions = []) {
+  // Map display page → LibGen server page
+  const libgenPage = Math.ceil(displayPage / (LIBGEN_PAGE_SIZE / DISPLAY_PAGE_SIZE));
+  const startIdx = ((displayPage - 1) % (LIBGEN_PAGE_SIZE / DISPLAY_PAGE_SIZE)) * DISPLAY_PAGE_SIZE;
+
+  let url = `${BASE_URL}/index.php?req=${encodeURIComponent(query)}&res=${LIBGEN_PAGE_SIZE}&covers=0&gmode=on&filesuns=all&page=${libgenPage}`;
   if (extensions.length > 0) {
     url += `&ext=${extensions.map(e => e.toLowerCase()).join("+")}`;
   }
 
   const resp = await axios.get(url, { headers: HEADERS, timeout: 20000 });
   const dom = new JSDOM(resp.data);
-  const doc = dom.window.document;
-  const rows = doc.querySelectorAll("table tr");
-  const books = [];
 
-  for (const row of rows) {
+  const allBooks = [];
+  for (const row of dom.window.document.querySelectorAll("table tr")) {
     const tds = row.querySelectorAll("td");
     if (tds.length < 8) continue;
 
@@ -41,33 +58,30 @@ async function searchLibGen(query, count = 10, extensions = []) {
     const title = tds[0].querySelector('a[href*="edition.php"]')?.textContent?.trim() || "";
     if (!title) continue;
 
-    const author = tds[1].textContent.trim();
+    const author    = tds[1].textContent.trim();
     const publisher = tds[2].textContent.trim();
-    const year = tds[3].textContent.trim();
-    const size = tds[6].textContent.trim();
+    const year      = tds[3].textContent.trim();
+    const language  = tds[4]?.textContent?.trim() || "";
+    const size      = tds[6].textContent.trim();
     const extension = tds[7].textContent.trim().toUpperCase();
 
     if (extensions.length > 0 && !extensions.map(e => e.toUpperCase()).includes(extension)) continue;
 
-    books.push({
-      index: books.length + 1,
-      title,
-      author,
-      publisher,
-      year,
-      extension,
-      size,
-      md5,
-    });
-
-    if (books.length >= count) break;
+    allBooks.push({ title, author, publisher, year, language, extension, size, size_bytes: parseSizeBytes(size), md5 });
   }
 
-  return books;
+  const books = allBooks.slice(startIdx, startIdx + DISPLAY_PAGE_SIZE);
+  const hasMore = allBooks.length > startIdx + DISPLAY_PAGE_SIZE || allBooks.length === LIBGEN_PAGE_SIZE;
+
+  return {
+    books,
+    displayPage,
+    hasMore,
+    hasPrev: displayPage > 1,
+  };
 }
 
 async function downloadBook(md5) {
-  // Step 1: Get the download key from ads.php
   const adsResp = await axios.get(`${BASE_URL}/ads.php?md5=${md5}`, {
     headers: HEADERS,
     timeout: 15000,
@@ -75,10 +89,8 @@ async function downloadBook(md5) {
 
   const keyMatch = adsResp.data.match(/get\.php\?md5=[A-Fa-f0-9]+&key=([A-Z0-9]+)/i);
   if (!keyMatch) throw new Error("Could not extract download key from ads page");
-
   const key = keyMatch[1];
 
-  // Step 2: Download the file
   const dlResp = await axios.get(`${BASE_URL}/get.php?md5=${md5}&key=${key}`, {
     headers: HEADERS,
     responseType: "arraybuffer",
@@ -86,47 +98,62 @@ async function downloadBook(md5) {
     maxRedirects: 5,
   });
 
-  const contentType = dlResp.headers["content-type"] || "";
-  const contentDisposition = dlResp.headers["content-disposition"] || "";
+  const combined = (dlResp.headers["content-type"] || "") + " " + (dlResp.headers["content-disposition"] || "");
+  const extPatterns = [
+    [/\.azw3/i, "azw3"], [/\.mobi/i, "mobi"], [/\.epub/i, "epub"],
+    [/\.pdf/i, "pdf"],   [/\.fb2/i,  "fb2"],  [/\.djvu/i, "djvu"],
+    [/\.doc\b/i, "doc"], [/\.txt/i,  "txt"],
+  ];
 
-  // Detect extension from headers
   let ext = "epub";
-  if (contentType.includes("pdf") || contentDisposition.includes(".pdf")) ext = "pdf";
-  else if (contentType.includes("epub") || contentDisposition.includes(".epub")) ext = "epub";
-  else if (contentDisposition.includes(".mobi")) ext = "mobi";
-  else if (contentDisposition.includes(".fb2")) ext = "fb2";
+  for (const [pattern, e] of extPatterns) {
+    if (pattern.test(combined)) { ext = e; break; }
+  }
 
   return { buffer: Buffer.from(dlResp.data), ext };
 }
 
+async function downloadBookWithRetry(md5, retries = 3) {
+  let lastError;
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await downloadBook(md5);
+    } catch (e) {
+      lastError = e;
+      if (i < retries - 1) await new Promise(r => setTimeout(r, 2000 * Math.pow(2, i)));
+    }
+  }
+  throw lastError;
+}
+
 server.tool(
   "search_books",
-  "Search for books on Library Genesis (LibGen). Returns a list with title, author, year, format, size, and MD5 identifier.",
+  "Search for books on Library Genesis. Returns 5 results per display page (with hasMore/hasPrev for pagination). Each book includes title, author, year, language, format, size, size_bytes, and MD5.",
   {
     query: z.string().describe("Book title, author, or keywords"),
-    count: z.number().optional().default(10).describe("Number of results (default 10, max 25)"),
+    page: z.number().optional().default(1).describe("Display page number (1-indexed, 5 results per page)"),
     extensions: z.array(z.string()).optional().describe("Filter by format, e.g. ['epub', 'pdf']"),
   },
-  async ({ query, count, extensions }) => {
-    const books = await searchLibGen(query, Math.min(count || 10, 25), extensions || []);
+  async ({ query, page, extensions }) => {
+    const result = await searchLibGen(query, page || 1, extensions || []);
     return {
-      content: [{ type: "text", text: JSON.stringify(books, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
   }
 );
 
 server.tool(
   "download_book",
-  "Download a book from LibGen by its MD5 hash. Returns the local file path of the downloaded file.",
+  "Download a book from LibGen by MD5 hash. Retries up to 3 times on failure. Returns local file path, size_bytes, and extension.",
   {
-    md5: z.string().describe("The MD5 hash of the book from search results"),
+    md5: z.string().describe("MD5 hash of the book from search results"),
     title: z.string().optional().describe("Book title (used for filename)"),
   },
   async ({ md5, title }) => {
-    const { buffer, ext } = await downloadBook(md5.toUpperCase());
+    const { buffer, ext } = await downloadBookWithRetry(md5.toUpperCase());
 
     const safeName = (title || md5).replace(/[^\w一-鿿\s\-]/g, "").trim().slice(0, 60) || md5;
-    const filename = `${safeName}.${ext}`;
+    const filename = `${safeName}_${Date.now()}.${ext}`;
     const filePath = path.join(os.tmpdir(), filename);
 
     fs.writeFileSync(filePath, buffer);
