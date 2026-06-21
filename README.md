@@ -83,7 +83,7 @@ Add to your `settings.json`:
   "mcpServers": {
     "find-a-book": {
       "command": "npx",
-      "args": ["-y", "github:Xiaochengzi2048/find-a-book-mcp"]
+      "args": ["-y", "find-a-book-mcp"]
     }
   }
 }
@@ -186,7 +186,7 @@ node server.js
   "mcpServers": {
     "find-a-book": {
       "command": "npx",
-      "args": ["-y", "github:Xiaochengzi2048/find-a-book-mcp"]
+      "args": ["-y", "find-a-book-mcp"]
     }
   }
 }
