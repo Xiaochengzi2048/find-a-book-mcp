@@ -30,7 +30,7 @@ const HEADERS = {
 const LIBGEN_PAGE_SIZE = 25;
 const DISPLAY_PAGE_SIZE = 5;
 
-const server = new McpServer({ name: "libgen", version: "1.2.0" });
+const server = new McpServer({ name: "libgen", version: "1.3.0" });
 
 function parseSizeBytes(sizeStr) {
   const m = sizeStr.match(/([\d.]+)\s*(kb|mb|gb)/i);
@@ -49,6 +49,7 @@ async function tryMirrors(mirrors, fn) {
     try {
       return await fn(mirror);
     } catch (e) {
+      process.stderr.write(`Mirror failed (${mirror.base || mirror}): ${e.message}\n`);
       lastError = e;
     }
   }
@@ -156,11 +157,12 @@ async function downloadFromMirror(base, md5) {
 }
 
 async function downloadFromLibraryLol(md5) {
-  const pageResp = await axios.get(`https://library.lol/main/${md5}`, {
+  const pageUrl = `https://library.lol/main/${md5}`;
+  const pageResp = await axios.get(pageUrl, {
     headers: HEADERS,
     timeout: 15000,
   });
-  const dom = new JSDOM(pageResp.data);
+  const dom = new JSDOM(pageResp.data, { url: pageUrl });
   const dlLink = dom.window.document.querySelector("#download a, h2 a");
   if (!dlLink) throw new Error("library.lol: could not find download link");
 
@@ -205,15 +207,16 @@ server.tool(
     query: z.string().describe("Book title, author, or keywords"),
   },
   async ({ query }) => {
-    // Fetch up to 3 LibGen pages (75 results) to get comprehensive format coverage
+    // Fetch up to 3 LibGen pages (75 results) in parallel for comprehensive format coverage
+    const pageResults = await Promise.all(
+      [1, 2, 3].map(libgenPage =>
+        tryMirrors(SEARCH_MIRRORS, (mirror) => searchOnMirror(mirror, query, libgenPage, []))
+          .catch(() => ({ allBooks: [], totalPages: 1 }))
+      )
+    );
     const allBooks = [];
-    for (let libgenPage = 1; libgenPage <= 3; libgenPage++) {
-      const { allBooks: pageBooks } = await tryMirrors(
-        SEARCH_MIRRORS,
-        (mirror) => searchOnMirror(mirror, query, libgenPage, [])
-      );
+    for (const { allBooks: pageBooks } of pageResults) {
       allBooks.push(...pageBooks);
-      if (pageBooks.length < LIBGEN_PAGE_SIZE) break;
     }
 
     // Group by normalized title + author
