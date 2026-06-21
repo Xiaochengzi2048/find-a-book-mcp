@@ -1,0 +1,20 @@
+{
+  "name": "find-a-book-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for searching and downloading books from Library Genesis (libgen.li)",
+  "main": "server.js",
+  "bin": {
+    "mcp-libgen": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": ["mcp", "libgen", "books", "ebook"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "axios": "^1.18.0",
+    "jsdom": "^26.0.0",
+    "zod": "^4.4.3"
+  }
+}
