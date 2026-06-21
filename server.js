@@ -192,6 +192,71 @@ async function downloadBook(md5) {
   throw lastError;
 }
 
+function normalizeKey(title, author) {
+  const t = title.toLowerCase().replace(/[^\w一-鿿]/g, "").slice(0, 30);
+  const a = author.toLowerCase().replace(/[^\w一-鿿]/g, "").slice(0, 20);
+  return `${t}|${a}`;
+}
+
+server.tool(
+  "get_formats",
+  "Search for a book and return all available formats grouped by unique title+author. Instead of many duplicate rows, each book appears once with a list of formats (EPUB/MOBI/PDF/AZW3 etc.) and their MD5s.",
+  {
+    query: z.string().describe("Book title, author, or keywords"),
+  },
+  async ({ query }) => {
+    // Fetch up to 3 LibGen pages (75 results) to get comprehensive format coverage
+    const allBooks = [];
+    for (let libgenPage = 1; libgenPage <= 3; libgenPage++) {
+      const { allBooks: pageBooks } = await tryMirrors(
+        SEARCH_MIRRORS,
+        (mirror) => searchOnMirror(mirror, query, libgenPage, [])
+      );
+      allBooks.push(...pageBooks);
+      if (pageBooks.length < LIBGEN_PAGE_SIZE) break;
+    }
+
+    // Group by normalized title + author
+    const grouped = new Map();
+    for (const book of allBooks) {
+      const key = normalizeKey(book.title, book.author);
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          title: book.title,
+          author: book.author,
+          publisher: book.publisher,
+          year: book.year,
+          language: book.language,
+          formats: new Map(), // extension → best (largest) entry
+        });
+      }
+      const entry = grouped.get(key);
+      const existing = entry.formats.get(book.extension);
+      if (!existing || book.size_bytes > existing.size_bytes) {
+        entry.formats.set(book.extension, {
+          extension: book.extension,
+          size: book.size,
+          size_bytes: book.size_bytes,
+          md5: book.md5,
+        });
+      }
+    }
+
+    const result = Array.from(grouped.values()).map(b => ({
+      title: b.title,
+      author: b.author,
+      publisher: b.publisher,
+      year: b.year,
+      language: b.language,
+      formats: Array.from(b.formats.values()).sort((a, z) => a.extension.localeCompare(z.extension)),
+    }));
+
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  }
+);
+
 server.tool(
   "search_books",
   "Search for books on Library Genesis (tries multiple mirrors automatically). Returns 5 results per display page with pagination support. Each book includes title, author, year, language, format, size, size_bytes, and MD5.",
