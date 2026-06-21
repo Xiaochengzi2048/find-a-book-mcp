@@ -45,6 +45,10 @@ async function searchLibGen(query, displayPage = 1, extensions = []) {
   const resp = await axios.get(url, { headers: HEADERS, timeout: 20000 });
   const dom = new JSDOM(resp.data);
 
+  // Extract total pages from paginator JS: new Paginator("id", totalPages, 25, currentPage, ...)
+  const paginatorMatch = resp.data.match(/new Paginator\("[^"]+",\s*(\d+),\s*(\d+),\s*(\d+)/);
+  const totalPages = paginatorMatch ? parseInt(paginatorMatch[1]) : 1;
+
   const allBooks = [];
   for (const row of dom.window.document.querySelectorAll("table tr")) {
     const tds = row.querySelectorAll("td");
@@ -71,11 +75,18 @@ async function searchLibGen(query, displayPage = 1, extensions = []) {
   }
 
   const books = allBooks.slice(startIdx, startIdx + DISPLAY_PAGE_SIZE);
-  const hasMore = allBooks.length > startIdx + DISPLAY_PAGE_SIZE || allBooks.length === LIBGEN_PAGE_SIZE;
+
+  // Total display pages = totalPages libgen pages × 5 display pages each
+  const totalDisplayPages = totalPages * (LIBGEN_PAGE_SIZE / DISPLAY_PAGE_SIZE);
+  const hasMore = displayPage < totalDisplayPages;
+  // Approximate total: exact on single page, estimated on multi-page
+  const totalCount = totalPages === 1 ? allBooks.length : totalPages * LIBGEN_PAGE_SIZE;
 
   return {
     books,
     displayPage,
+    totalDisplayPages: totalPages > 1 ? totalDisplayPages : 1,
+    totalCount,
     hasMore,
     hasPrev: displayPage > 1,
   };
