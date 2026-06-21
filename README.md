@@ -6,6 +6,29 @@ An MCP (Model Context Protocol) server for searching and downloading books from 
 
 ## Tools
 
+### `get_formats`
+Search for a book and return all available formats grouped by unique title + author. Instead of many duplicate rows, each book appears once with a list of all available formats (EPUB / MOBI / PDF / AZW3, etc.) and their MD5s. Fetches up to 75 results in parallel for comprehensive coverage.
+
+**Parameters:**
+- `query` (string, required) — Book title, author, or keywords
+
+**Returns:**
+```json
+[
+  {
+    "title": "Harry Potter and the Philosopher's Stone",
+    "author": "J.K. Rowling",
+    "publisher": "Bloomsbury",
+    "year": "2015",
+    "language": "English",
+    "formats": [
+      { "extension": "EPUB", "size": "920 kB", "size_bytes": 942080, "md5": "D7FF6458..." },
+      { "extension": "MOBI", "size": "1.1 MB", "size_bytes": 1153433, "md5": "A3CC9012..." }
+    ]
+  }
+]
+```
+
 ### `search_books`
 Search for books by title, author, or keywords. Returns **5 results per page** with pagination support.
 
@@ -39,7 +62,7 @@ Search for books by title, author, or keywords. Returns **5 results per page** w
 ```
 
 ### `download_book`
-Download a book by its MD5 hash. Retries up to 3 times on failure.
+Download a book by its MD5 hash. Automatically tries multiple mirrors in order: `libgen.li` → `libgen.rs` → `libgen.st` → `library.lol`.
 
 **Parameters:**
 - `md5` (string, required) — MD5 hash from search results
@@ -79,9 +102,9 @@ node server.js
 
 ## How It Works
 
-1. **Search** — Scrapes `libgen.li` search results (no API key or account required)
+1. **Search** — Scrapes LibGen HTML (no API key or account required); tries `libgen.li` → `libgen.rs` → `libgen.st` automatically
 2. **Paginate** — LibGen returns 25 results per server page; this server presents 5 per display page with `hasMore`/`hasPrev` flags for navigation
-3. **Download** — Two-step: fetch a one-time key from `ads.php`, then download via `get.php`; retries up to 3× on failure
+3. **Download** — Two-step: fetch a one-time key from `ads.php`, then download via `get.php`; falls back through all mirrors then `library.lol` on failure
 4. **Save** — File saved to system temp directory (`/tmp/`) with a timestamped filename to avoid collisions
 
 ---
@@ -92,6 +115,7 @@ node server.js
 - Supports EPUB, MOBI, PDF, AZW3, FB2, DJVU, and more
 - `size_bytes` field lets callers decide delivery method (e.g. direct send vs. link for large files)
 - Downloaded files are saved to `/tmp/` — move them as needed
+- Mirror failures are logged to stderr for easy debugging
 
 ---
 ---
@@ -103,6 +127,28 @@ node server.js
 ---
 
 ## 工具说明
+
+### `get_formats` — 按格式汇总
+搜索一本书，将所有重复条目按「书名 + 作者」归并，每本书只出现一次，并列出所有可用格式（EPUB / MOBI / PDF / AZW3 等）及其 MD5。并行抓取最多 75 条结果，覆盖更全面。
+
+**参数：**
+- `query`（必填）— 书名、作者或关键词
+
+**返回示例：**
+```json
+[
+  {
+    "title": "置身事内",
+    "author": "兰小欢",
+    "year": "2021",
+    "language": "Chinese",
+    "formats": [
+      { "extension": "EPUB", "size": "2.3 MB", "size_bytes": 2411724, "md5": "..." },
+      { "extension": "PDF",  "size": "8.1 MB", "size_bytes": 8493466, "md5": "..." }
+    ]
+  }
+]
+```
 
 ### `search_books` — 搜索书籍
 按书名、作者或关键词搜索，每页返回 5 条结果，支持翻页。
@@ -119,7 +165,7 @@ node server.js
 - `hasMore` / `hasPrev` — 是否有下一页 / 上一页
 
 ### `download_book` — 下载书籍
-通过 MD5 下载书籍，失败自动重试最多 3 次。
+通过 MD5 下载书籍，自动按顺序尝试多个镜像：`libgen.li` → `libgen.rs` → `libgen.st` → `library.lol`。
 
 **参数：**
 - `md5`（必填）— 搜索结果中的 MD5
@@ -159,9 +205,9 @@ node server.js
 
 ## 工作原理
 
-1. **搜索** — 抓取 `libgen.li` 页面，无需账号或 API Key
+1. **搜索** — 抓取 LibGen 页面，无需账号或 API Key；自动尝试 `libgen.li` → `libgen.rs` → `libgen.st`
 2. **分页** — LibGen 每次返回 25 条，本服务每显示页展示 5 条，通过 `hasMore`/`hasPrev` 驱动翻页
-3. **下载** — 两步流程：从 `ads.php` 获取一次性 key，再通过 `get.php` 下载；失败自动重试最多 3 次
+3. **下载** — 两步流程：从 `ads.php` 获取一次性 key，再通过 `get.php` 下载；所有镜像失败后自动切换到 `library.lol`
 4. **保存** — 文件存入 `/tmp/`，文件名含时间戳防冲突
 
 ---
@@ -172,3 +218,4 @@ node server.js
 - 支持 EPUB、MOBI、PDF、AZW3、FB2、DJVU 等格式
 - `size_bytes` 字段方便调用方判断发送方式（如小文件直发，大文件给链接）
 - 文件默认保存在 `/tmp/`，请自行移至目标位置
+- 镜像失败时会写入 stderr，便于排查问题
