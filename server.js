@@ -9,17 +9,28 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-const BASE_URL = "https://libgen.li";
+// Mirrors tried in order for both search and download
+const SEARCH_MIRRORS = [
+  { base: "https://libgen.li", searchPath: "/index.php" },
+  { base: "https://libgen.rs", searchPath: "/search.php" },
+  { base: "https://libgen.st", searchPath: "/search.php" },
+];
+
+const DOWNLOAD_MIRRORS = [
+  "https://libgen.li",
+  "https://libgen.rs",
+  "https://libgen.st",
+];
+
 const HEADERS = {
   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  "Referer": BASE_URL,
 };
 
 // LibGen returns 25 results per server page; we show 5 per display page
 const LIBGEN_PAGE_SIZE = 25;
 const DISPLAY_PAGE_SIZE = 5;
 
-const server = new McpServer({ name: "libgen", version: "1.1.0" });
+const server = new McpServer({ name: "libgen", version: "1.2.0" });
 
 function parseSizeBytes(sizeStr) {
   const m = sizeStr.match(/([\d.]+)\s*(kb|mb|gb)/i);
@@ -32,21 +43,31 @@ function parseSizeBytes(sizeStr) {
   return 0;
 }
 
-async function searchLibGen(query, displayPage = 1, extensions = []) {
-  // Map display page → LibGen server page
-  const libgenPage = Math.ceil(displayPage / (LIBGEN_PAGE_SIZE / DISPLAY_PAGE_SIZE));
-  const startIdx = ((displayPage - 1) % (LIBGEN_PAGE_SIZE / DISPLAY_PAGE_SIZE)) * DISPLAY_PAGE_SIZE;
+async function tryMirrors(mirrors, fn) {
+  let lastError;
+  for (const mirror of mirrors) {
+    try {
+      return await fn(mirror);
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError;
+}
 
-  let url = `${BASE_URL}/index.php?req=${encodeURIComponent(query)}&res=${LIBGEN_PAGE_SIZE}&covers=0&gmode=on&filesuns=all&page=${libgenPage}`;
+async function searchOnMirror(mirror, query, libgenPage, extensions) {
+  let url = `${mirror.base}${mirror.searchPath}?req=${encodeURIComponent(query)}&res=${LIBGEN_PAGE_SIZE}&covers=0&gmode=on&filesuns=all&page=${libgenPage}`;
   if (extensions.length > 0) {
     url += `&ext=${extensions.map(e => e.toLowerCase()).join("+")}`;
   }
 
-  const resp = await axios.get(url, { headers: HEADERS, timeout: 20000 });
+  const resp = await axios.get(url, {
+    headers: { ...HEADERS, Referer: mirror.base },
+    timeout: 20000,
+  });
   const dom = new JSDOM(resp.data);
 
-  // Extract total pages from paginator JS: new Paginator("id", totalPages, 25, currentPage, ...)
-  const paginatorMatch = resp.data.match(/new Paginator\("[^"]+",\s*(\d+),\s*(\d+),\s*(\d+)/);
+  const paginatorMatch = resp.data.match(/new Paginator\("[^"]+",\s*(\d+)/);
   const totalPages = paginatorMatch ? parseInt(paginatorMatch[1]) : 1;
 
   const allBooks = [];
@@ -74,64 +95,98 @@ async function searchLibGen(query, displayPage = 1, extensions = []) {
     allBooks.push({ title, author, publisher, year, language, extension, size, size_bytes: parseSizeBytes(size), md5 });
   }
 
-  const books = allBooks.slice(startIdx, startIdx + DISPLAY_PAGE_SIZE);
+  return { allBooks, totalPages };
+}
 
-  // Total display pages = totalPages libgen pages × 5 display pages each
-  const totalDisplayPages = totalPages * (LIBGEN_PAGE_SIZE / DISPLAY_PAGE_SIZE);
-  const hasMore = displayPage < totalDisplayPages;
-  // Approximate total: exact on single page, estimated on multi-page
+async function searchLibGen(query, displayPage = 1, extensions = []) {
+  const libgenPage = Math.ceil(displayPage / (LIBGEN_PAGE_SIZE / DISPLAY_PAGE_SIZE));
+  const startIdx = ((displayPage - 1) % (LIBGEN_PAGE_SIZE / DISPLAY_PAGE_SIZE)) * DISPLAY_PAGE_SIZE;
+
+  const { allBooks, totalPages } = await tryMirrors(
+    SEARCH_MIRRORS,
+    (mirror) => searchOnMirror(mirror, query, libgenPage, extensions)
+  );
+
+  const books = allBooks.slice(startIdx, startIdx + DISPLAY_PAGE_SIZE);
+  const totalDisplayPages = totalPages > 1 ? totalPages * (LIBGEN_PAGE_SIZE / DISPLAY_PAGE_SIZE) : 1;
   const totalCount = totalPages === 1 ? allBooks.length : totalPages * LIBGEN_PAGE_SIZE;
 
   return {
     books,
     displayPage,
-    totalDisplayPages: totalPages > 1 ? totalDisplayPages : 1,
+    totalDisplayPages,
     totalCount,
-    hasMore,
+    hasMore: displayPage < totalDisplayPages,
     hasPrev: displayPage > 1,
   };
 }
 
-async function downloadBook(md5) {
-  const adsResp = await axios.get(`${BASE_URL}/ads.php?md5=${md5}`, {
-    headers: HEADERS,
+const EXT_PATTERNS = [
+  [/\.azw3/i, "azw3"], [/\.mobi/i, "mobi"], [/\.epub/i, "epub"],
+  [/\.pdf/i,  "pdf"],  [/\.fb2/i,  "fb2"],  [/\.djvu/i, "djvu"],
+  [/\.doc\b/i,"doc"],  [/\.txt/i,  "txt"],
+];
+
+function detectExt(headers) {
+  const combined = (headers["content-type"] || "") + " " + (headers["content-disposition"] || "");
+  for (const [pattern, e] of EXT_PATTERNS) {
+    if (pattern.test(combined)) return e;
+  }
+  return "epub";
+}
+
+async function downloadFromMirror(base, md5) {
+  const adsResp = await axios.get(`${base}/ads.php?md5=${md5}`, {
+    headers: { ...HEADERS, Referer: base },
     timeout: 15000,
   });
 
   const keyMatch = adsResp.data.match(/get\.php\?md5=[A-Fa-f0-9]+&key=([A-Z0-9]+)/i);
-  if (!keyMatch) throw new Error("Could not extract download key from ads page");
+  if (!keyMatch) throw new Error(`${base}: could not extract download key`);
   const key = keyMatch[1];
 
-  const dlResp = await axios.get(`${BASE_URL}/get.php?md5=${md5}&key=${key}`, {
+  const dlResp = await axios.get(`${base}/get.php?md5=${md5}&key=${key}`, {
+    headers: { ...HEADERS, Referer: base },
+    responseType: "arraybuffer",
+    timeout: 60000,
+    maxRedirects: 5,
+  });
+
+  return { buffer: Buffer.from(dlResp.data), ext: detectExt(dlResp.headers) };
+}
+
+async function downloadFromLibraryLol(md5) {
+  const pageResp = await axios.get(`https://library.lol/main/${md5}`, {
+    headers: HEADERS,
+    timeout: 15000,
+  });
+  const dom = new JSDOM(pageResp.data);
+  const dlLink = dom.window.document.querySelector("#download a, h2 a");
+  if (!dlLink) throw new Error("library.lol: could not find download link");
+
+  const dlResp = await axios.get(dlLink.href, {
     headers: HEADERS,
     responseType: "arraybuffer",
     timeout: 60000,
     maxRedirects: 5,
   });
 
-  const combined = (dlResp.headers["content-type"] || "") + " " + (dlResp.headers["content-disposition"] || "");
-  const extPatterns = [
-    [/\.azw3/i, "azw3"], [/\.mobi/i, "mobi"], [/\.epub/i, "epub"],
-    [/\.pdf/i, "pdf"],   [/\.fb2/i,  "fb2"],  [/\.djvu/i, "djvu"],
-    [/\.doc\b/i, "doc"], [/\.txt/i,  "txt"],
-  ];
-
-  let ext = "epub";
-  for (const [pattern, e] of extPatterns) {
-    if (pattern.test(combined)) { ext = e; break; }
-  }
-
-  return { buffer: Buffer.from(dlResp.data), ext };
+  return { buffer: Buffer.from(dlResp.data), ext: detectExt(dlResp.headers) };
 }
 
-async function downloadBookWithRetry(md5, retries = 3) {
+async function downloadBook(md5) {
+  // Try standard mirrors first, then library.lol as last resort
+  const allAttempts = [
+    ...DOWNLOAD_MIRRORS.map(base => () => downloadFromMirror(base, md5)),
+    () => downloadFromLibraryLol(md5),
+  ];
+
   let lastError;
-  for (let i = 0; i < retries; i++) {
+  for (const attempt of allAttempts) {
     try {
-      return await downloadBook(md5);
+      return await attempt();
     } catch (e) {
       lastError = e;
-      if (i < retries - 1) await new Promise(r => setTimeout(r, 2000 * Math.pow(2, i)));
     }
   }
   throw lastError;
@@ -139,7 +194,7 @@ async function downloadBookWithRetry(md5, retries = 3) {
 
 server.tool(
   "search_books",
-  "Search for books on Library Genesis. Returns 5 results per display page (with hasMore/hasPrev for pagination). Each book includes title, author, year, language, format, size, size_bytes, and MD5.",
+  "Search for books on Library Genesis (tries multiple mirrors automatically). Returns 5 results per display page with pagination support. Each book includes title, author, year, language, format, size, size_bytes, and MD5.",
   {
     query: z.string().describe("Book title, author, or keywords"),
     page: z.number().optional().default(1).describe("Display page number (1-indexed, 5 results per page)"),
@@ -155,13 +210,13 @@ server.tool(
 
 server.tool(
   "download_book",
-  "Download a book from LibGen by MD5 hash. Retries up to 3 times on failure. Returns local file path, size_bytes, and extension.",
+  "Download a book from LibGen by MD5 hash. Tries multiple mirrors automatically (libgen.li → libgen.rs → libgen.st → library.lol). Returns local file path, size_bytes, and extension.",
   {
     md5: z.string().describe("MD5 hash of the book from search results"),
     title: z.string().optional().describe("Book title (used for filename)"),
   },
   async ({ md5, title }) => {
-    const { buffer, ext } = await downloadBookWithRetry(md5.toUpperCase());
+    const { buffer, ext } = await downloadBook(md5.toUpperCase());
 
     const safeName = (title || md5).replace(/[^\w一-鿿\s\-]/g, "").trim().slice(0, 60) || md5;
     const filename = `${safeName}_${Date.now()}.${ext}`;
