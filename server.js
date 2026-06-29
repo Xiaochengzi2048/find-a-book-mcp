@@ -30,7 +30,7 @@ const HEADERS = {
 const LIBGEN_PAGE_SIZE = 25;
 const DISPLAY_PAGE_SIZE = 5;
 
-const server = new McpServer({ name: "libgen", version: "1.3.0" });
+const server = new McpServer({ name: "libgen", version: "1.4.0" });
 
 function parseSizeBytes(sizeStr) {
   const m = sizeStr.match(/([\d.]+)\s*(kb|mb|gb)/i);
@@ -43,17 +43,14 @@ function parseSizeBytes(sizeStr) {
   return 0;
 }
 
-async function tryMirrors(mirrors, fn) {
-  let lastError;
-  for (const mirror of mirrors) {
-    try {
-      return await fn(mirror);
-    } catch (e) {
-      process.stderr.write(`Mirror failed (${mirror.base || mirror}): ${e.message}\n`);
-      lastError = e;
-    }
+async function raceMirrors(mirrors, fn) {
+  try {
+    return await Promise.any(mirrors.map(mirror => fn(mirror)));
+  } catch (e) {
+    const errors = e instanceof AggregateError ? e.errors : [e];
+    errors.forEach(err => process.stderr.write(`Mirror failed: ${err.message}\n`));
+    throw errors[errors.length - 1];
   }
-  throw lastError;
 }
 
 async function searchOnMirror(mirror, query, libgenPage, extensions) {
@@ -103,7 +100,7 @@ async function searchLibGen(query, displayPage = 1, extensions = []) {
   const libgenPage = Math.ceil(displayPage / (LIBGEN_PAGE_SIZE / DISPLAY_PAGE_SIZE));
   const startIdx = ((displayPage - 1) % (LIBGEN_PAGE_SIZE / DISPLAY_PAGE_SIZE)) * DISPLAY_PAGE_SIZE;
 
-  const { allBooks, totalPages } = await tryMirrors(
+  const { allBooks, totalPages } = await raceMirrors(
     SEARCH_MIRRORS,
     (mirror) => searchOnMirror(mirror, query, libgenPage, extensions)
   );
@@ -136,25 +133,6 @@ function detectExt(headers) {
   return "epub";
 }
 
-async function downloadFromMirror(base, md5) {
-  const adsResp = await axios.get(`${base}/ads.php?md5=${md5}`, {
-    headers: { ...HEADERS, Referer: base },
-    timeout: 15000,
-  });
-
-  const keyMatch = adsResp.data.match(/get\.php\?md5=[A-Fa-f0-9]+&key=([A-Z0-9]+)/i);
-  if (!keyMatch) throw new Error(`${base}: could not extract download key`);
-  const key = keyMatch[1];
-
-  const dlResp = await axios.get(`${base}/get.php?md5=${md5}&key=${key}`, {
-    headers: { ...HEADERS, Referer: base },
-    responseType: "arraybuffer",
-    timeout: 60000,
-    maxRedirects: 5,
-  });
-
-  return { buffer: Buffer.from(dlResp.data), ext: detectExt(dlResp.headers) };
-}
 
 async function downloadFromLibraryLol(md5) {
   const pageUrl = `https://library.lol/main/${md5}`;
@@ -177,21 +155,40 @@ async function downloadFromLibraryLol(md5) {
 }
 
 async function downloadBook(md5) {
-  // Try standard mirrors first, then library.lol as last resort
-  const allAttempts = [
-    ...DOWNLOAD_MIRRORS.map(base => () => downloadFromMirror(base, md5)),
-    () => downloadFromLibraryLol(md5),
-  ];
-
-  let lastError;
-  for (const attempt of allAttempts) {
-    try {
-      return await attempt();
-    } catch (e) {
-      lastError = e;
-    }
+  // Race all mirrors concurrently on the cheap ads.php key-fetch, then download from winner.
+  // This avoids parallel file downloads that would waste bandwidth.
+  let winner;
+  try {
+    winner = await Promise.any(
+      DOWNLOAD_MIRRORS.map(base =>
+        axios.get(`${base}/ads.php?md5=${md5}`, {
+          headers: { ...HEADERS, Referer: base },
+          timeout: 15000,
+        }).then(adsResp => {
+          const keyMatch = adsResp.data.match(/get\.php\?md5=[A-Fa-f0-9]+&key=([A-Z0-9]+)/i);
+          if (!keyMatch) throw new Error(`${base}: could not extract download key`);
+          return { base, key: keyMatch[1] };
+        })
+      )
+    );
+  } catch {
+    // All standard mirrors failed — fall back to library.lol
+    return downloadFromLibraryLol(md5);
   }
-  throw lastError;
+
+  try {
+    const { base, key } = winner;
+    const dlResp = await axios.get(`${base}/get.php?md5=${md5}&key=${key}`, {
+      headers: { ...HEADERS, Referer: base },
+      responseType: "arraybuffer",
+      timeout: 60000,
+      maxRedirects: 5,
+    });
+    return { buffer: Buffer.from(dlResp.data), ext: detectExt(dlResp.headers) };
+  } catch {
+    // Winner's download failed — fall back to library.lol
+    return downloadFromLibraryLol(md5);
+  }
 }
 
 function normalizeKey(title, author) {
@@ -210,7 +207,7 @@ server.tool(
     // Fetch up to 3 LibGen pages (75 results) in parallel for comprehensive format coverage
     const pageResults = await Promise.all(
       [1, 2, 3].map(libgenPage =>
-        tryMirrors(SEARCH_MIRRORS, (mirror) => searchOnMirror(mirror, query, libgenPage, []))
+        raceMirrors(SEARCH_MIRRORS, (mirror) => searchOnMirror(mirror, query, libgenPage, []))
           .catch(() => ({ allBooks: [], totalPages: 1 }))
       )
     );
