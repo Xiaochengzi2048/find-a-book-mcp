@@ -114,6 +114,7 @@ node server.js
 
 - No account or API key required
 - Supports EPUB, MOBI, PDF, AZW3, FB2, DJVU, and more
+- **`LIBGEN_MIRRORS` env var** — override the default mirror list (comma-separated base URLs) when domains rotate, e.g. `LIBGEN_MIRRORS="https://libgen.is,https://libgen.gs"`. `searchPath` is inferred per host (libgen.li → `/index.php`, others → `/search.php`).
 - `size_bytes` field lets callers decide delivery method (e.g. direct send vs. link for large files)
 - Downloaded files are saved to `/tmp/` — move them as needed
 - Mirror failures are logged to stderr for easy debugging
@@ -218,6 +219,7 @@ node server.js
 
 - 无需账号或 API Key
 - 支持 EPUB、MOBI、PDF、AZW3、FB2、DJVU 等格式
+- **`LIBGEN_MIRRORS` 环境变量** — 域名轮换时可覆盖默认镜像列表（逗号分隔的 base URL），如 `LIBGEN_MIRRORS="https://libgen.is,https://libgen.gs"`。`searchPath` 按域名自动推断（libgen.li → `/index.php`，其余 → `/search.php`）。
 - `size_bytes` 字段方便调用方判断发送方式（如小文件直发，大文件给链接）
 - 文件默认保存在 `/tmp/`，请自行移至目标位置
 - 镜像失败时会写入 stderr，便于排查问题

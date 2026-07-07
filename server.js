@@ -9,18 +9,23 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-// Mirrors tried in order for both search and download
-const SEARCH_MIRRORS = [
-  { base: "https://libgen.li", searchPath: "/index.php" },
-  { base: "https://libgen.rs", searchPath: "/search.php" },
-  { base: "https://libgen.st", searchPath: "/search.php" },
-];
+// Mirrors tried in order for both search and download.
+// Override at runtime with LIBGEN_MIRRORS (comma-separated base URLs), e.g.
+//   LIBGEN_MIRRORS="https://libgen.is,https://libgen.gs"
+// LibGen domains rotate often; this lets you swap mirrors without editing code.
+// searchPath is inferred per host: libgen.li uses /index.php, others use /search.php.
+const DEFAULT_MIRRORS = ["https://libgen.li", "https://libgen.rs", "https://libgen.st"];
 
-const DOWNLOAD_MIRRORS = [
-  "https://libgen.li",
-  "https://libgen.rs",
-  "https://libgen.st",
-];
+function searchPathFor(base) {
+  return /libgen\.li\b/.test(base) ? "/index.php" : "/search.php";
+}
+
+const MIRROR_BASES = (process.env.LIBGEN_MIRRORS
+  ? process.env.LIBGEN_MIRRORS.split(",").map(s => s.trim()).filter(Boolean)
+  : DEFAULT_MIRRORS);
+
+const SEARCH_MIRRORS = MIRROR_BASES.map(base => ({ base, searchPath: searchPathFor(base) }));
+const DOWNLOAD_MIRRORS = MIRROR_BASES;
 
 const HEADERS = {
   "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -125,10 +130,31 @@ const EXT_PATTERNS = [
   [/\.doc\b/i,"doc"],  [/\.txt/i,  "txt"],
 ];
 
+// Map common Content-Type values to extensions (content-type has no dot,
+// so the .ext patterns above never match it — this table handles that case).
+const CONTENT_TYPE_EXT = [
+  [/epub\+zip/i, "epub"], [/x-mobipocket/i, "mobi"], [/vnd\.amazon\.ebook/i, "azw3"],
+  [/pdf/i, "pdf"], [/x-fictionbook|fb2/i, "fb2"], [/djvu/i, "djvu"],
+  [/msword|vnd\.openxmlformats.*wordprocessing/i, "doc"], [/text\/plain/i, "txt"],
+];
+
 function detectExt(headers) {
-  const combined = (headers["content-type"] || "") + " " + (headers["content-disposition"] || "");
+  // 1) Prefer the real extension from the Content-Disposition filename, e.g.
+  //    attachment; filename="Some Book.pdf"  ->  "pdf"
+  const disp = headers["content-disposition"] || "";
+  const fnMatch = disp.match(/filename\*?=(?:UTF-8''|")?[^"';\n]*\.([A-Za-z0-9]{2,5})/i);
+  if (fnMatch) {
+    const ext = fnMatch[1].toLowerCase();
+    if (EXT_PATTERNS.some(([, e]) => e === ext)) return ext;
+  }
+  // 2) Fall back to matching the .ext pattern anywhere in the disposition string.
   for (const [pattern, e] of EXT_PATTERNS) {
-    if (pattern.test(combined)) return e;
+    if (pattern.test(disp)) return e;
+  }
+  // 3) Fall back to the Content-Type MIME value.
+  const ctype = headers["content-type"] || "";
+  for (const [pattern, e] of CONTENT_TYPE_EXT) {
+    if (pattern.test(ctype)) return e;
   }
   return "epub";
 }
