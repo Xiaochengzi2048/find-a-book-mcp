@@ -30,7 +30,7 @@ const HEADERS = {
 const LIBGEN_PAGE_SIZE = 25;
 const DISPLAY_PAGE_SIZE = 5;
 
-const server = new McpServer({ name: "libgen", version: "1.4.0" });
+const server = new McpServer({ name: "libgen", version: "1.5.0" });
 
 function parseSizeBytes(sizeStr) {
   const m = sizeStr.match(/([\d.]+)\s*(kb|mb|gb)/i);
@@ -279,13 +279,16 @@ server.tool(
   {
     md5: z.string().describe("MD5 hash of the book from search results"),
     title: z.string().optional().describe("Book title (used for filename)"),
+    dest_dir: z.string().optional().describe("Destination directory to save the file (defaults to the system temp directory). Created if it does not exist."),
   },
-  async ({ md5, title }) => {
+  async ({ md5, title, dest_dir }) => {
     const { buffer, ext } = await downloadBook(md5.toUpperCase());
 
     const safeName = (title || md5).replace(/[^\w一-鿿\s\-]/g, "").trim().slice(0, 60) || md5;
     const filename = `${safeName}_${Date.now()}.${ext}`;
-    const filePath = path.join(os.tmpdir(), filename);
+    const targetDir = dest_dir || os.tmpdir();
+    fs.mkdirSync(targetDir, { recursive: true });
+    const filePath = path.join(targetDir, filename);
 
     fs.writeFileSync(filePath, buffer);
 

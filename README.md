@@ -67,6 +67,7 @@ Download a book by its MD5 hash. Automatically tries multiple mirrors in order: 
 **Parameters:**
 - `md5` (string, required) — MD5 hash from search results
 - `title` (string, optional) — Book title, used for the filename
+- `dest_dir` (string, optional) — Destination directory (defaults to system temp dir; created if missing)
 
 **Returns:** Local file path, filename, size in bytes, and format extension.
 
@@ -170,6 +171,7 @@ node server.js
 **参数：**
 - `md5`（必填）— 搜索结果中的 MD5
 - `title`（可选）— 书名，用于文件命名
+- `dest_dir`（可选）— 保存目录（默认系统临时目录，不存在会自动创建）
 
 **返回：** 本地文件路径、文件名、字节大小、格式。
 
