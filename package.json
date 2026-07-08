@@ -1,6 +1,6 @@
 {
   "name": "find-a-book-mcp",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "MCP server for searching and downloading books from Library Genesis (libgen.li)",
   "main": "server.js",
   "bin": {

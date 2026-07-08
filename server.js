@@ -35,7 +35,7 @@ const HEADERS = {
 const LIBGEN_PAGE_SIZE = 25;
 const DISPLAY_PAGE_SIZE = 5;
 
-const server = new McpServer({ name: "libgen", version: "1.7.0" });
+const server = new McpServer({ name: "libgen", version: "1.7.1" });
 
 // ---- Z-Library client (optional, requires ZLIBRARY_EMAIL + ZLIBRARY_PASSWORD) ----
 // Uses the /eapi/ JSON endpoints directly — no Turnstile, no scraping.
@@ -47,6 +47,7 @@ const zlibState = {
   loggedIn: false,
   remix_userid: process.env.ZLIBRARY_REMIX_USERID || null,
   remix_userkey: process.env.ZLIBRARY_REMIX_USERKEY || null,
+  cookies: null,  // raw cookie string for download endpoint
 };
 
 async function zlibEnsureLogin() {
@@ -66,10 +67,15 @@ async function zlibEnsureLogin() {
   }
 
   const resp = await axios.post(`${ZLIB_BASE}/eapi/user/login`,
-    new URLSearchParams({ email, password }).toString(),
+    new URLSearchParams({
+      isModal: "true", email, password,
+      site_mode: "books", action: "login", redirectUrl: "", gg_json_mode: "1"
+    }).toString(),
     {
       headers: { "User-Agent": ZLIB_UA, "Content-Type": "application/x-www-form-urlencoded" },
       timeout: 15000,
+      maxRedirects: 0,
+      validateStatus: s => s < 400,
     }
   );
 
@@ -80,6 +86,9 @@ async function zlibEnsureLogin() {
   const user = resp.data.user;
   zlibState.remix_userid = String(user.id);
   zlibState.remix_userkey = user.remix_userkey;
+  // Save cookies for download endpoint (needs Cookie header, not remix- headers)
+  const setCookies = resp.headers["set-cookie"] || [];
+  zlibState.cookies = setCookies.map(c => c.split(";")[0]).join("; ");
   zlibState.loggedIn = true;
   process.stderr.write(`[zlibrary] Logged in as ${user.email} (id=${user.id})\n`);
 }
@@ -150,12 +159,25 @@ async function zlibSearch(query, { page = 1, limit = 10, extensions = [], yearFr
 async function zlibDownload(bookId, bookHash, title) {
   await zlibEnsureLogin();
 
-  const resp = await axios.get(`${ZLIB_BASE}/eapi/book/${bookId}/${bookHash}/file`, {
+  // Step 1: get the real download link (requires Cookie auth, not remix- headers)
+  const linkResp = await axios.get(`${ZLIB_BASE}/eapi/book/${bookId}/${bookHash}/file`, {
     headers: {
       "User-Agent": ZLIB_UA,
-      "remix-userid": zlibState.remix_userid,
-      "remix-userkey": zlibState.remix_userkey,
+      "Cookie": zlibState.cookies,
     },
+    timeout: 15000,
+  });
+
+  if (!linkResp.data?.success || !linkResp.data?.file?.downloadLink) {
+    throw new Error(`Z-Library get download link failed: ${JSON.stringify(linkResp.data)}`);
+  }
+
+  const downloadLink = linkResp.data.file.downloadLink;
+  process.stderr.write(`[zlibrary] Downloading from: ${downloadLink}\n`);
+
+  // Step 2: download the actual file
+  const resp = await axios.get(downloadLink, {
+    headers: { "User-Agent": ZLIB_UA, "Cookie": zlibState.cookies },
     responseType: "arraybuffer",
     timeout: 90000,
     maxRedirects: 5,
